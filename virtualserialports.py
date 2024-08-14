@@ -183,9 +183,9 @@ class AsyncVirtualSerialPort:
         from serial import Serial
         from virtualserialports import AsyncVirtualSerialPort
 
-        with VirtualSerialPort() as port:
-            print(port)
-            with Serial(port) as s:
+        with AsyncVirtualSerialPort() as port:
+            print(port.ttyname)
+            with Serial(port.ttyname) as s:
                 s.write(b'hello')
                 print(s.read())
         """
@@ -235,25 +235,24 @@ class AsyncVirtualSerialPort:
         self._main_file = None
         self.ttyname = None
 
-    @classmethod
-    async def run(cls, debug: bool=False, loopback: bool=False):
+    async def run(self):
         """Forward data, until self.running is set to False or the process is
         terminated.
         """
 
-        with cls(debug=debug, loopback=loopback) as port, Selector() as selector:
+        with Selector() as selector:
 
-            if port._main_file is None or port._main_fd is None:
+            if self._main_file is None or self._main_fd is None:
                 raise NotOpenedException("No port available.")
 
             # Flush stdout, in case the ports are being read in a pipe. Else
             # Python will buffer it and block.
             sys.stdout.flush()
 
-            selector.register(port._main_fd, EVENT_READ)
+            selector.register(self._main_fd, EVENT_READ)
 
-            port.running = True
-            while port.running:
+            self.running = True
+            while self.running:
                 await asyncio.sleep(0)
 
                 for key, events in selector.select(timeout=0):
@@ -261,16 +260,16 @@ class AsyncVirtualSerialPort:
                     if not events & EVENT_READ:
                         continue
 
-                    data = port._main_file.read()
+                    data = self._main_file.read()
 
-                    if port.debug:
-                        print(port.ttyname, data, file=sys.stderr)
+                    if self.debug:
+                        print(self.ttyname, data, file=sys.stderr)
                         sys.stderr.flush()
 
                     # Write to master files. If loopback is False, don't write
                     # to the sending file.
-                    if port.loopback:
-                        port._main_file.write(data)
+                    if self.loopback:
+                        self._main_file.write(data)
 
     async def stop(self):
         """Stop the background thread if running."""
