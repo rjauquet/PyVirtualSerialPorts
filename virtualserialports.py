@@ -174,30 +174,20 @@ class VirtualSerialPorts:
 
 class AsyncVirtualSerialPort:
     def __init__(self, loopback: bool=False, debug: bool=False):
-        """Class for managing a virtual serial port.
-
-        Can be used as a context manager which will create the port, start the
-        processing, and return the port on entry; and close and remove the
-        port on exit. For example, using PySerial:
-
-        from serial import Serial
-        from virtualserialports import AsyncVirtualSerialPort
-
-        with AsyncVirtualSerialPort() as port:
-            print(port.ttyname)
-            with Serial(port.ttyname) as s:
-                s.write(b'hello')
-                print(s.read())
-        """
+        """Class for managing an async virtual serial port pair."""
 
         self.loopback = loopback
         self.debug = debug
         self.running = False
 
-        self._thread = None
-        self._main_fd = None
-        self._main_file = None
-        self.ttyname = None
+        self._host_fd = None
+        self._host_file = None
+
+        self._device_fd = None
+        self._device_file = None
+
+        self.host_ttyname = None
+        self.device_ttyname = None
 
     def __enter__(self):
         self.open()
@@ -210,30 +200,40 @@ class AsyncVirtualSerialPort:
         """Configure and open the ports."""
 
         self.close()
-        self._main_fd, node_fd = pty.openpty()
 
-        # Set raw (pass through control characters) and blocking mode on the
-        # master. Nodes expected to be configured by the client.
-        tty.setraw(self._main_fd)
-        os.set_blocking(self._main_fd, False)
+        self._host_fd, host_node_fd = pty.openpty()
+        self._device_fd, device_node_fd = pty.openpty()
 
-        # Open the main file descriptor, and store the file object in the
-        # dict.
-        self._main_file = open(self._main_fd, 'r+b', buffering=0)
+        tty.setraw(self._host_fd)
+        os.set_blocking(self._host_fd, False)
+
+        tty.setraw(self._device_fd)
+        os.set_blocking(self._device_fd, False)
+
+        self._host_file = open(self._host_fd, 'r+b', buffering=0)
+        self._device_file = open(self._device_fd, 'r+b', buffering=0)
 
         # Get the os-visible name (e.g. /dev/pts/1) and store in dict.
-        self.ttyname = os.ttyname(node_fd)
+        self.host_ttyname = os.ttyname(host_node_fd)
+        self.device_ttyname = os.ttyname(device_node_fd)
 
     def close(self):
         """Close ports."""
         self.running = False
 
-        if self._main_file is not None:
-            self._main_file.close()
+        if self._host_file is not None:
+            self._host_file.close()
 
-        self._main_fd = None
-        self._main_file = None
-        self.ttyname = None
+        if self._device_file is not None:
+            self._device_file.close()
+
+        self._host_fd = None
+        self._host_file = None
+        self.host_ttyname = None
+
+        self._device_fd = None
+        self._device_file = None
+        self.device_ttyname = None
 
     async def run(self):
         """Forward data, until self.running is set to False or the process is
@@ -242,14 +242,15 @@ class AsyncVirtualSerialPort:
 
         with Selector() as selector:
 
-            if self._main_file is None or self._main_fd is None:
+            if self._host_file is None or self._host_fd is None or self._device_file is None or self._device_fd is None:
                 raise NotOpenedException("No port available.")
 
             # Flush stdout, in case the ports are being read in a pipe. Else
             # Python will buffer it and block.
             sys.stdout.flush()
 
-            selector.register(self._main_fd, EVENT_READ)
+            selector.register(self._host_fd, EVENT_READ)
+            selector.register(self._device_fd, EVENT_READ)
 
             self.running = True
             while self.running:
@@ -260,16 +261,31 @@ class AsyncVirtualSerialPort:
                     if not events & EVENT_READ:
                         continue
 
-                    data = self._main_file.read()
+                    if key.fileobj == self._host_fd:
+                        # data going from the host to the device
+                        data = self._host_file.read()
 
-                    if self.debug:
-                        print(self.ttyname, data, file=sys.stderr)
-                        sys.stderr.flush()
+                        if self.debug:
+                            print(self.host_ttyname, data, file=sys.stderr)
+                            sys.stderr.flush()
 
-                    # Write to master files. If loopback is False, don't write
-                    # to the sending file.
-                    if self.loopback:
-                        self._main_file.write(data)
+                        if self.loopback:
+                            self._host_file.write(data)
+
+                        self._device_file.write(data)
+
+
+                    elif key.fileobj == self._device_fd:
+                        # data going from the device to the host
+                        data = self._device_file.read()
+                        if self.debug:
+                            print(self.device_ttyname, data, file=sys.stderr)
+                            sys.stderr.flush()
+
+                        if self.loopback:
+                            self._device_file.write(data)
+
+                        self._host_file.write(data)
 
     async def stop(self):
         """Stop the background thread if running."""
